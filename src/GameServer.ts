@@ -6,14 +6,17 @@ declare type ChatEvents = {
     authorId: string;
     messageId: string;
   };
-  connect: number;
+  connect: {
+    channel: Channel;
+  };
+  disconnect: void;
 };
 
 declare type ChatEvent = keyof ChatEvents;
 
 interface SubEvents extends Record<ChatEvent, string> {
   message: Channel;
-  connect: "hey";
+  connect: Channel;
 }
 
 declare type EventWithSubEvent<T extends ChatEvent> = T extends any
@@ -115,9 +118,16 @@ export default class GameServer {
         this.dispatch(`message:${name as Channel}`, payload);
       }
     }
+  }
 
+  async setupSleepHandler() {
     this.on("message:admin", (message) => {
-      if (message.content == "sleep") this.goToSleep();
+      if (message.content == "sleep") this.sleep();
+    });
+  }
+  async setupWakeHandler() {
+    this.on("message:admin", (message) => {
+      if (message.content == "wake") this.wake();
     });
   }
 
@@ -125,7 +135,6 @@ export default class GameServer {
     oldState: Discord.VoiceState,
     newState: Discord.VoiceState
   ) {
-    // Handle joining and leaving
     if (
       Object.values(this.voiceChannels).includes(
         newState.channel as Discord.VoiceChannel
@@ -135,7 +144,8 @@ export default class GameServer {
     else if (
       Object.values(this.voiceChannels).includes(
         oldState.channel as Discord.VoiceChannel
-      )
+      ) &&
+      !newState.channel.name.startsWith(this.prefix)
     )
       await this.leave(oldState.member);
   }
@@ -146,6 +156,8 @@ export default class GameServer {
     this.bot.on("voiceStateUpdate", (a, b) =>
       this.handleVoiceStateUpdateHandler(a, b)
     );
+    this.setupSleepHandler();
+    this.setupWakeHandler();
   }
 
   async getBed(user: Discord.GuildMember) {
@@ -157,18 +169,22 @@ export default class GameServer {
         }
       );
       this.beds.set(user, channel);
+
+      channel.permissionOverwrites.create(this.guild.roles.everyone, {
+        VIEW_CHANNEL: false,
+      });
     }
 
     return this.beds.get(user);
   }
 
-  async goToSleep() {
+  async sleep() {
     console.log("Sleeping, moving all to bed");
     for (let player of this.players)
       await player.voice.setChannel(await this.getBed(player));
   }
 
-  async wakeUp() {
+  async wake() {
     console.log("Waking up, moving all to village");
     for (let player of this.players)
       await player.voice.setChannel(this.voiceChannels.village);
