@@ -314,7 +314,7 @@ export default class GameServer {
 
     return {
       getReply: () => fullfillmentToken.promise,
-      cancel: (withValue?: T) => fullfillmentToken.resolve(withValue ?? null),
+      cancel: (withValue) => fullfillmentToken.resolve(withValue ?? null),
       delete: async () => {
         fullfillmentToken.resolve(null);
         await message.delete();
