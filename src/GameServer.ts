@@ -1,4 +1,8 @@
-import Discord, { TextChannel, VoiceChannel } from "discord.js";
+import Discord, {
+  InternalDiscordGatewayAdapterCreator,
+  TextChannel,
+  VoiceChannel,
+} from "discord.js";
 import { v4 as uuidv4 } from "uuid";
 
 type ChatEvents = {
@@ -67,15 +71,21 @@ export default class GameServer {
     return [...this.channels.values()].includes(channel);
   }
 
-  getChannelName(channel: Discord.VoiceChannel | Discord.TextChannel) {
+  getChannelName(channel: Discord.VoiceChannel | Discord.TextChannel | string) {
+    if (typeof channel == "string")
+      if (this.channels.has(channel)) return channel;
+      else throw new Error("Channel not part of game");
+
     for (let channelPair of this.channels) {
       if (channelPair[1] == channel) return channelPair[0];
     }
-    return null;
+    throw new Error("Channel not part of game");
   }
-  async removeChannel(channelName: string) {
-    let channel = this.channels.get(channelName);
-    await channel.delete();
+  async removeChannel(
+    channel: string | Discord.TextChannel | Discord.VoiceChannel
+  ) {
+    let channelName = this.getChannelName(channel);
+    await this.channels.get(channelName).delete();
     this.channels.delete(channelName);
     this.voiceChannels.delete(channelName);
     this.textChannels.delete(channelName);
@@ -217,23 +227,24 @@ export default class GameServer {
     });
   }
 
-  async moveToChannel(user: Discord.GuildMember, channelName: string) {
+  async moveToChannel(
+    user: Discord.GuildMember,
+    channel: string | Discord.VoiceChannel
+  ) {
+    const channelName = this.getChannelName(channel);
     if (!user.voice.channel) throw new Error("User is not in channel");
     if (!this.isGameChannel(user.voice.channel as Discord.VoiceChannel))
       throw new Error("User is not in game channel");
 
-    const channel = this.voiceChannels.get(channelName);
-    if (!channel) throw new Error("Channel does not exist");
-
-    await user.voice.setChannel(channel);
+    await user.voice.setChannel(this.voiceChannels.get(channelName));
   }
 
-  async sendMessage(channel: string, message: string) {
-    await this.textChannels.get(channel).send(message);
+  async sendMessage(channel: string | Discord.TextChannel, message: string) {
+    await this.textChannels.get(this.getChannelName(channel)).send(message);
   }
 
   async prompt<T extends string>(
-    channel: string,
+    channel: string | Discord.TextChannel,
     query: string,
     options: T[]
   ): Promise<Prompt<T>> {
@@ -247,21 +258,23 @@ export default class GameServer {
       idByOption.set(option, responseId);
     }
 
-    const message = await this.textChannels.get(channel).send({
-      content: query,
-      components: [
-        new Discord.MessageActionRow({
-          components: options.map(
-            (option) =>
-              new Discord.MessageButton({
-                customId: idByOption.get(option),
-                label: option,
-                style: "PRIMARY",
-              })
-          ),
-        }),
-      ],
-    });
+    const message = await this.textChannels
+      .get(this.getChannelName(channel))
+      .send({
+        content: query,
+        components: [
+          new Discord.MessageActionRow({
+            components: options.map(
+              (option) =>
+                new Discord.MessageButton({
+                  customId: idByOption.get(option),
+                  label: option,
+                  style: "PRIMARY",
+                })
+            ),
+          }),
+        ],
+      });
 
     const handlers: ((interaction: Discord.Interaction) => void)[] = [];
     const waitForReponse = (customId: string) =>
