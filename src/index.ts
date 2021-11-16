@@ -13,18 +13,6 @@ const bot = new Discord.Client({
 
 bot.login(process.env.KEY);
 
-// bot.on("voiceStateUpdate", (oldState, newState) => {
-//   if (newState.channelId) {
-//     console.log(oldState.member.displayName, "joined", newState.channelId);
-//     if (oldState.channelId !== null) {
-//       console.log("Moving to", oldState.channelId);
-//       newState.member.voice.setChannel(oldState.channel);
-//     }
-//   } else {
-//     console.log(oldState.member.displayName, "left", oldState.channelId);
-//   }
-// });
-
 // Setup hand-off the game server
 bot.on("ready", (client) => {
   console.log("Ready");
