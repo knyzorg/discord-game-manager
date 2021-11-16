@@ -1,4 +1,5 @@
-import Discord, { TextChannel } from "discord.js";
+import Discord, { TextChannel, VoiceChannel } from "discord.js";
+import { v4 as uuidv4 } from "uuid";
 
 type ChatEvents = {
   message: {
@@ -18,21 +19,35 @@ type ChatEvents = {
 type ChatEvent = keyof ChatEvents;
 type EventWithChannel<T extends ChatEvent> = T | `${T}:${string}`;
 
+type CancellationToken<T> = {
+  promise: Promise<T>;
+  reject: () => void;
+  resolve: (value: T) => void;
+};
+
+export type Prompt<T> = {
+  getReply: () => Promise<T | null>;
+  cancel: (withValue?: T) => void;
+  delete: () => Promise<void>;
+};
 export default class GameServer {
   guild: Discord.Guild;
   bot: Discord.Client<boolean>;
   callbacks: Map<string, Set<(callback: ChatEvents[ChatEvent]) => void>>;
-  prefix = "mafia-";
+  prefix: string;
 
-  channels: Map<string, Discord.Channel>;
+  channels: Map<string, Discord.VoiceChannel | Discord.TextChannel>;
   voiceChannels: Map<string, Discord.VoiceChannel>;
   textChannels: Map<string, Discord.TextChannel>;
 
-  constructor(bot: Discord.Client<boolean>, guild: Discord.Guild) {
+  constructor(
+    bot: Discord.Client<boolean>,
+    guild: Discord.Guild,
+    prefix = "game-"
+  ) {
     this.guild = guild;
     this.bot = bot;
-
-    this.prepareGame();
+    this.prefix = prefix;
   }
 
   async cleanup() {
@@ -48,13 +63,22 @@ export default class GameServer {
     await Promise.all(deleting);
   }
 
-  isGameChannel(channel: Discord.Channel) {
+  isGameChannel(channel: Discord.VoiceChannel | Discord.TextChannel) {
     return [...this.channels.values()].includes(channel);
   }
 
-  async removeChannel(channel: string | Discord.Channel) {
-    if (typeof channel == "string") await this.channels.get(channel).delete();
-    else channel.delete();
+  getChannelName(channel: Discord.VoiceChannel | Discord.TextChannel) {
+    for (let channelPair of this.channels) {
+      if (channelPair[1] == channel) return channelPair[0];
+    }
+    return null;
+  }
+  async removeChannel(channelName: string) {
+    let channel = this.channels.get(channelName);
+    await channel.delete();
+    this.channels.delete(channelName);
+    this.voiceChannels.delete(channelName);
+    this.textChannels.delete(channelName);
   }
 
   async messageHandler(message: Discord.Message) {
@@ -66,6 +90,7 @@ export default class GameServer {
     )
       return;
 
+    if (member.id == this.bot.user.id) return;
     console.log("Message received", content);
     const payload = {
       user: member,
@@ -85,28 +110,46 @@ export default class GameServer {
     oldState: Discord.VoiceState,
     newState: Discord.VoiceState
   ) {
+    // Detect full connect/disconnects
     if (
-      !this.isGameChannel(oldState.channel) &&
-      this.isGameChannel(newState.channel)
+      !this.isGameChannel(oldState.channel as Discord.VoiceChannel) &&
+      this.isGameChannel(newState.channel as Discord.VoiceChannel)
     ) {
       this.dispatch<"connect">("connect", {
-        channel: newState.member.voice.channel as Discord.VoiceChannel,
+        channel: newState.channel as Discord.VoiceChannel,
         user: newState.member,
       });
     }
 
     if (
-      this.isGameChannel(oldState.channel) &&
-      !this.isGameChannel(newState.channel)
+      this.isGameChannel(oldState.channel as Discord.VoiceChannel) &&
+      !this.isGameChannel(newState.channel as Discord.VoiceChannel)
     ) {
       this.dispatch<"disconnect">("disconnect", {
-        channel: oldState.member.voice.channel as Discord.VoiceChannel,
+        channel: oldState.channel as Discord.VoiceChannel,
         user: oldState.member,
       });
     }
+
+    const oldChannelName = this.getChannelName(
+      oldState.channel as VoiceChannel
+    );
+    const newChannelName = this.getChannelName(
+      newState.channel as VoiceChannel
+    );
+    if (oldChannelName)
+      this.dispatch<"disconnect">(`disconnect:${oldChannelName}`, {
+        channel: oldState.channel as Discord.VoiceChannel,
+        user: oldState.member,
+      });
+    if (newChannelName)
+      this.dispatch<"connect">(`connect:${newChannelName}`, {
+        channel: newState.channel as Discord.VoiceChannel,
+        user: newState.member,
+      });
   }
 
-  async prepareGame() {
+  async init() {
     await this.cleanup();
     this.bot.on("message", (...args) => this.messageHandler(...args));
     this.bot.on("voiceStateUpdate", (...args) =>
@@ -154,11 +197,116 @@ export default class GameServer {
     return channel;
   }
 
-  async moveUserToChannel(
+  async setChannelAccess(
     user: Discord.GuildMember,
-    channel: Discord.VoiceChannel
+    channelName: string,
+    allow: boolean
   ) {
-    if (!user.voice.channel) await user.voice.setChannel(channel);
+    const channel = this.channels.get(channelName);
+    if (!channel) throw new Error("Channel does not exist");
+    await channel.permissionOverwrites.create(user, {
+      VIEW_CHANNEL: allow,
+    });
+  }
+
+  async setChannelLock(channelName: string, lock: boolean) {
+    const channel = this.channels.get(channelName);
+    if (!channel) throw new Error("Channel does not exist");
+    await channel.permissionOverwrites.create(this.guild.roles.everyone, {
+      SEND_MESSAGES: !lock,
+    });
+  }
+
+  async moveToChannel(user: Discord.GuildMember, channelName: string) {
+    if (!user.voice.channel) throw new Error("User is not in channel");
+    if (!this.isGameChannel(user.voice.channel as Discord.VoiceChannel))
+      throw new Error("User is not in game channel");
+
+    const channel = this.voiceChannels.get(channelName);
+    if (!channel) throw new Error("Channel does not exist");
+
+    await user.voice.setChannel(channel);
+  }
+
+  async sendMessage(channel: string, message: string) {
+    await this.textChannels.get(channel).send(message);
+  }
+
+  async prompt<T extends string>(
+    channel: string,
+    query: string,
+    options: T[]
+  ): Promise<Prompt<T>> {
+    const fullfillmentToken = createCancellationToken<T | null>();
+
+    const optionById = new Map<string, T>();
+    const idByOption = new Map<T, string>();
+    for (let option of options) {
+      const responseId = `query-${uuidv4()}`;
+      optionById.set(responseId, option);
+      idByOption.set(option, responseId);
+    }
+
+    const message = await this.textChannels.get(channel).send({
+      content: query,
+      components: [
+        new Discord.MessageActionRow({
+          components: options.map(
+            (option) =>
+              new Discord.MessageButton({
+                customId: idByOption.get(option),
+                label: option,
+                style: "PRIMARY",
+              })
+          ),
+        }),
+      ],
+    });
+
+    const handlers: ((interaction: Discord.Interaction) => void)[] = [];
+    const waitForReponse = (customId: string) =>
+      new Promise<void>((resolve) => {
+        const option = optionById.get(customId);
+        const interactionHandler = (interaction: Discord.Interaction) => {
+          if (!interaction.isButton()) return;
+          if (interaction.customId == customId) {
+            console.log("Pressed button", option);
+
+            interaction.deferUpdate();
+
+            // Response arrived! Resolving.
+            fullfillmentToken.resolve(option);
+          }
+        };
+        this.bot.on("interactionCreate", interactionHandler);
+        handlers.push(interactionHandler);
+
+        // If fullfillment token comes back before a reply, another option was selected.
+        fullfillmentToken.promise.then((option) => {
+          resolve();
+          message.edit({
+            content: `${message.content}\n*${option ?? "No reply"}*`,
+            components: [],
+          });
+        });
+      });
+
+    for (let [customId] of optionById) {
+      waitForReponse(customId);
+    }
+
+    fullfillmentToken.promise.then(() => {
+      for (let handler of handlers) this.bot.off("interactionCreate", handler);
+    });
+
+    return {
+      getReply: () => fullfillmentToken.promise,
+      cancel: (withValue?: T) => fullfillmentToken.resolve(withValue ?? null),
+      delete: async () => {
+        fullfillmentToken.resolve(null);
+        await message.delete();
+      },
+    };
   }
 
   /**
@@ -184,7 +332,21 @@ export default class GameServer {
     event: EventWithChannel<K>,
     payload: ChatEvents[K]
   ) {
-    console.log("Dispatching event", event, "with", payload);
+    console.log("Dispatching event", event);
     for (let cb of this.callbacks.get(event) ?? []) cb(payload);
   }
+}
+
+export function createCancellationToken<T = void>(): CancellationToken<T> {
+  let reject: () => void;
+  let resolve: (value: T) => void;
+  let promise = new Promise<T>((res, rej) => {
+    [reject, resolve] = [rej, res];
+  });
+
+  return {
+    promise,
+    reject,
+    resolve,
+  };
 }
