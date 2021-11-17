@@ -23,7 +23,7 @@ type ChatEvents = {
 type ChatEvent = keyof ChatEvents;
 type EventWithChannel<T extends ChatEvent> = T | `${T}:${string}`;
 
-type CancellationToken<T> = {
+type AsyncToken<T> = {
   promise: Promise<T>;
   reject: () => void;
   resolve: (value: T) => void;
@@ -241,7 +241,9 @@ export default class GameServer {
   }
 
   async sendMessage(channel: string | Discord.TextChannel, message: string) {
-    await this.textChannels.get(this.getChannelName(channel)).send(message);
+    return await this.textChannels
+      .get(this.getChannelName(channel))
+      .send(message);
   }
 
   async prompt<T extends string>(
@@ -249,7 +251,7 @@ export default class GameServer {
     query: string,
     options: T[]
   ): Promise<Prompt<T>> {
-    const fullfillmentToken = createCancellationToken<T | null>();
+    const fullfillmentToken = createAsyncToken<T | null>();
 
     const optionById = new Map<string, T>();
     const idByOption = new Map<T, string>();
@@ -351,7 +353,7 @@ export default class GameServer {
   }
 }
 
-export function createCancellationToken<T = void>(): CancellationToken<T> {
+export function createAsyncToken<T = void>(): AsyncToken<T> {
   let reject: () => void;
   let resolve: (value: T) => void;
   let promise = new Promise<T>((res, rej) => {

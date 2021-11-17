@@ -1,6 +1,6 @@
 import Discord, { VoiceChannel } from "discord.js";
 import GameServer, { Prompt } from "./GameServer";
-import { wait } from "./util/Timer";
+import { wait, countdown } from "./util/Timer";
 
 type Role =
   | "President"
@@ -68,7 +68,8 @@ export default class TwoRoomsOneBoomController {
       console.log("Got message", message.content);
       switch (message.content.toLowerCase()) {
         case "begin": {
-          if (this.players.size > 0) await this.nominatePhase();
+          if (this.players.size > 0 && this.phase == "Starting")
+            await this.nominatePhase();
           else
             message.reply(
               `This game requires a minimum of 6 people. There are currently ${this.players.size} players in the lobby.`
@@ -117,6 +118,7 @@ export default class TwoRoomsOneBoomController {
     ];
     for (let player of this.players) {
       let role = roles.pop();
+      this.roles.set(player, role);
       this.server.sendMessage(
         this.privateChannels.get(player),
         `${player}, you are The ${role}. Your objective is to end the game in the same room as the President. Find out identities by asking to show cards to one another. You can reveal either your affiliation, or your full role.`
@@ -162,6 +164,8 @@ export default class TwoRoomsOneBoomController {
         `Nomination phase: The first player to be nominated as Leader will be elected Leader of that room.`
       );
       for (let otherPlayer of this.players) {
+        if (player == otherPlayer) break;
+        console.log(`Sending prompt for ${player} to nominate ${otherPlayer}`);
         const prompt = await server.prompt(
           channelName,
           `Nomination for Leader: ${otherPlayer}`,
@@ -169,6 +173,7 @@ export default class TwoRoomsOneBoomController {
         );
         prompts.push(prompt);
 
+        console.log(`Sent prompt for ${player} to nominate ${otherPlayer}`);
         prompt.getReply().then((reply) => {
           if (reply == "Nominate") {
             this.leaders[
@@ -194,6 +199,99 @@ export default class TwoRoomsOneBoomController {
     this.broadcast(
       `${this.leaders["room-two"]} has been nominated as leader of Room Two.`
     );
+
+    this.sharingPhase();
+  }
+
+  async sharingPhase() {
+    this.phase = "Sharing";
+    await this.broadcast(
+      "Sharing phase! Request to share identities with other players in your room. \n\
+      Be sure to only request once the other person has agreed to share identities as requests expire after 20 seconds.\n\
+      You have 3 minutes for this phase."
+    );
+
+    const countdownMessages: Promise<Discord.Message>[] = [];
+    let countdownPromise = new Promise<void>(async (resolve) => {
+      countdown(60 * 5, 5, async (seconds) => {
+        for (let m of countdownMessages) {
+          (await m).edit(`Time remaining ${seconds} seconds`);
+        }
+        if (seconds == 0) {
+          resolve();
+          for (let m of countdownMessages) {
+            (await m).delete();
+          }
+        }
+      });
+      for (let player of this.players) {
+        const countdownMessage = this.server.sendMessage(
+          this.privateChannels.get(player),
+          "*Timer loading*"
+        );
+        countdownMessages.push(countdownMessage);
+      }
+    });
+
+    // Wait for the timer messages to send
+    await Promise.all(countdownMessages);
+
+    const shareMessages: Prompt<any>[] = [];
+    for (let player of this.players) {
+      for (let otherPlayer of this.players) {
+        if (player == otherPlayer) break;
+
+        let prompt = await this.server.prompt(
+          this.privateChannels.get(player),
+          `Trading with ${otherPlayer}`,
+          ["Share Affiliation", "Share Identity"]
+        );
+
+        prompt.getReply().then(async (reply) => {
+          let confirmationPrompt = await this.server.prompt(
+            this.privateChannels.get(otherPlayer),
+            `${player} has requested to ${reply}`,
+            ["Accept", "Decline"]
+          );
+          shareMessages.push(confirmationPrompt);
+
+          wait(20000).then(() => confirmationPrompt.cancel("Decline"));
+
+          confirmationPrompt.getReply().then((reply) => {
+            switch (reply) {
+              case "Accept":
+                {
+                  this.server.sendMessage(
+                    this.privateChannels.get(player),
+                    `${otherPlayer} has revealed themselves to be ${this.roles.get(
+                      otherPlayer
+                    )}`
+                  );
+                  this.server.sendMessage(
+                    this.privateChannels.get(otherPlayer),
+                    `${player} has revealed themselves to be ${this.roles.get(
+                      player
+                    )}`
+                  );
+                }
+                break;
+              case "Decline": {
+                this.server.sendMessage(
+                  this.privateChannels.get(player),
+                  `${otherPlayer} has declined to share their card with you`
+                );
+                break;
+              }
+            }
+          });
+        });
+      }
+    }
+    await countdownPromise;
+    for (let m of shareMessages) {
+      m.delete();
+    }
+    console.log("Countdown complete");
   }
 
   async broadcast(message: string) {
