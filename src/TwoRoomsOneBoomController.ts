@@ -183,16 +183,16 @@ export default class TwoRoomsOneBoomController {
           }
         });
       }
-
-      await Promise.all(prompts.map((p) => p.getReply()));
-      console.log("The nominee is", this.leaders["room-one"].displayName);
-      this.broadcast(
-        `${this.leaders["room-one"]} has been nominated as leader of Room One.`
-      );
-      this.broadcast(
-        `${this.leaders["room-two"]} has been nominated as leader of Room Two.`
-      );
     }
+
+    await Promise.all(prompts.map((p) => p.getReply()));
+    console.log("The nominee is", this.leaders["room-one"].displayName);
+    this.broadcast(
+      `${this.leaders["room-one"]} has been nominated as leader of Room One.`
+    );
+    this.broadcast(
+      `${this.leaders["room-two"]} has been nominated as leader of Room Two.`
+    );
   }
 
   async broadcast(message: string) {
