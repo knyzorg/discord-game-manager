@@ -34,6 +34,7 @@ export default class TwoRoomsOneBoomController {
   }
 
   async abort(reason?: string) {
+    this.phase = "Aborting";
     await this.server.sendMessage(
       "admin",
       `**Game Aborted**. Reason: ${
@@ -41,7 +42,7 @@ export default class TwoRoomsOneBoomController {
       }\nRestarting resetting game in 15 seconds...`
     );
     await wait(15000);
-    await this.server.init();
+    await this.startPhase();
   }
   async startPhase() {
     this.players = new Set();
