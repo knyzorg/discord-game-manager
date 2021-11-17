@@ -24,7 +24,7 @@ export default class TwoRoomsOneBoomController {
   roles: Map<Discord.GuildMember, Role>;
   privateChannels: Map<Discord.GuildMember, string>;
   phase: Phase;
-  presidents: {
+  leaders: {
     "room-one": Discord.GuildMember;
     "room-two": Discord.GuildMember;
   };
@@ -36,13 +36,21 @@ export default class TwoRoomsOneBoomController {
   async abort(reason?: string) {
     await this.server.sendMessage(
       "admin",
-      `**Game Aborted**. Reason: ${reason ?? "Unknown"}`
+      `**Game Aborted**. Reason: ${
+        reason ?? "Unknown"
+      }\nRestarting resetting game in 15 seconds...`
     );
+    await wait(15000);
+    await this.server.init();
   }
   async startPhase() {
     this.players = new Set();
     this.roles = new Map();
     this.privateChannels = new Map();
+    this.leaders = {
+      "room-one": null,
+      "room-two": null,
+    };
     this.phase = "Starting";
     await this.server.init();
     const server = this.server;
@@ -57,8 +65,20 @@ export default class TwoRoomsOneBoomController {
 
     server.on("message:admin", async ({ message }) => {
       console.log("Got message", message.content);
-      if (message.content == "begin") {
-        await this.nominatePhase();
+      switch (message.content.toLowerCase()) {
+        case "begin": {
+          if (this.players.size > 0) await this.nominatePhase();
+          else
+            message.reply(
+              `This game requires a minimum of 6 people. There are currently ${this.players.size} players in the lobby.`
+            );
+          break;
+        }
+        case "abort":
+          this.abort(
+            `${message.member.displayName} has manually aborted the game.`
+          );
+          break;
       }
     });
 
@@ -85,6 +105,23 @@ export default class TwoRoomsOneBoomController {
     console.log(response);
   }
 
+  assignRoles() {
+    const roles: Role[] = [
+      "President",
+      "Bomber",
+      "Sniper",
+      "Target",
+      "Decoy",
+      "Hot Potato",
+    ];
+    for (let player of this.players) {
+      let role = roles.pop();
+      this.server.sendMessage(
+        this.privateChannels.get(player),
+        `${player}, you are The ${role}. Your objective is to end the game in the same room as the President. Find out identities by asking to show cards to one another. You can reveal either your affiliation, or your full role.`
+      );
+    }
+  }
   async nominatePhase() {
     this.phase = "Nominating";
     const server = this.server;
@@ -110,33 +147,30 @@ export default class TwoRoomsOneBoomController {
       this.privateChannels.set(player, channelName);
       await server.createSecretChannel(channelName, "GUILD_TEXT");
       await server.setChannelAccess(player, channelName, true);
-      await server.sendMessage(
-        channelName,
-        `${player}, you are The Bomber. Your objective is to end the game in the same room as the President. Find out identities by asking to show cards to one another. You can reveal either your affiliation, or your full role.`
-      );
     }
     await server.setChannelLock("admin", true);
     await server.removeChannel("lobby");
 
+    this.assignRoles();
     let prompts: Prompt<"Nominate">[] = [];
 
     for (let player of this.players) {
       const channelName = this.privateChannels.get(player);
       await server.sendMessage(
         channelName,
-        `Nomination phase: The first player to be nominated as president will be elected president of that room.`
+        `Nomination phase: The first player to be nominated as Leader will be elected Leader of that room.`
       );
       for (let otherPlayer of this.players) {
         const prompt = await server.prompt(
           channelName,
-          `Nomination for president: ${otherPlayer.displayName}`,
+          `Nomination for Leader: ${otherPlayer}`,
           ["Nominate"]
         );
         prompts.push(prompt);
 
         prompt.getReply().then((reply) => {
           if (reply == "Nominate") {
-            this.presidents[
+            this.leaders[
               server.getChannelName(
                 otherPlayer.voice.channel as VoiceChannel
               ) as "room-one" | "room-two"
@@ -151,8 +185,18 @@ export default class TwoRoomsOneBoomController {
       }
 
       await Promise.all(prompts.map((p) => p.getReply()));
-
-      console.log("The nominee is", this.presidents["room-one"].displayName);
+      console.log("The nominee is", this.leaders["room-one"].displayName);
+      this.broadcast(
+        `${this.leaders["room-one"]} has been nominated as leader of Room One.`
+      );
+      this.broadcast(
+        `${this.leaders["room-two"]} has been nominated as leader of Room Two.`
+      );
     }
+  }
+
+  async broadcast(message: string) {
+    for (let [_, channel] of this.privateChannels)
+      await this.server.sendMessage(channel, message);
   }
 }

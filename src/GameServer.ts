@@ -72,9 +72,10 @@ export default class GameServer {
   }
 
   getChannelName(channel: Discord.VoiceChannel | Discord.TextChannel | string) {
+    if (channel == null) return null;
     if (typeof channel == "string")
       if (this.channels.has(channel)) return channel;
-      else throw new Error("Channel not part of game");
+      else throw new Error(`Channel ${channel} not part of game`);
 
     for (let channelPair of this.channels) {
       if (channelPair[1] == channel) return channelPair[0];
