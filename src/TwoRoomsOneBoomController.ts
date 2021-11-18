@@ -164,8 +164,9 @@ export default class TwoRoomsOneBoomController {
         `Nomination phase: The first player to be nominated as Leader will be elected Leader of that room.`
       );
       for (let otherPlayer of this.players) {
-        if (player == otherPlayer) break;
+        if (player == otherPlayer) continue;
         console.log(`Sending prompt for ${player} to nominate ${otherPlayer}`);
+
         const prompt = await server.prompt(
           channelName,
           `Nomination for Leader: ${otherPlayer}`,
@@ -239,7 +240,7 @@ export default class TwoRoomsOneBoomController {
     const shareMessages: Prompt<any>[] = [];
     for (let player of this.players) {
       for (let otherPlayer of this.players) {
-        if (player == otherPlayer) break;
+        if (player == otherPlayer) continue;
 
         let prompt = await this.server.prompt(
           this.privateChannels.get(player),
