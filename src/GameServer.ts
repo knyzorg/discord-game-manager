@@ -23,9 +23,9 @@ type ChatEvents = {
 type ChatEvent = keyof ChatEvents;
 type EventWithChannel<T extends ChatEvent> = T | `${T}:${string}`;
 
-type AsyncToken<T> = {
+export type AsyncToken<T = any, E = any> = {
   promise: Promise<T>;
-  reject: () => void;
+  reject: (value?: E) => void;
   resolve: (value: T) => void;
 };
 
@@ -57,7 +57,6 @@ export default class GameServer {
   async cleanup() {
     this.bot.removeAllListeners();
 
-    console.log("Creating channels...");
     // Cleanup old channels
     const deleting = this.guild.channels.cache
       .filter((c) => c.name.startsWith(this.prefix))

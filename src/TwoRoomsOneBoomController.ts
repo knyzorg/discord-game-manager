@@ -1,5 +1,5 @@
 import Discord, { VoiceChannel } from "discord.js";
-import GameServer, { Prompt } from "./GameServer";
+import GameServer, { AsyncToken, createAsyncToken, Prompt } from "./GameServer";
 import { wait, countdown } from "./util/Timer";
 import shuffle from "shuffle-array";
 
@@ -21,33 +21,59 @@ type Phase =
 
 type RoomName = "room-one" | "room-two";
 const roomNames: RoomName[] = ["room-one", "room-two"];
+
+class GameAbortedError extends Error {
+  constructor(...args: ConstructorParameters<typeof Error>) {
+    super(...args);
+  }
+}
+
 export default class TwoRoomsOneBoomController {
   server: GameServer;
   players: Set<Discord.GuildMember>;
   roles: Map<Discord.GuildMember, Role>;
   privateChannels: Map<Discord.GuildMember, string>;
   phase: Phase;
+  abortGameToken: AsyncToken<any, any>;
   leaders: {
     "room-one": Discord.GuildMember;
     "room-two": Discord.GuildMember;
   };
   constructor(server: GameServer) {
     this.server = server;
-    this.startPhase();
+    this.playGame();
   }
 
-  async abort(reason?: string) {
-    this.phase = "Aborting";
-    await this.server.sendMessage(
-      "admin",
-      `**Game Aborted**. Reason: ${
-        reason ?? "Unknown"
-      }\nRestarting resetting game in 15 seconds...`
-    );
-    await wait(15000);
-    await this.startPhase();
+  async playGame() {
+    while (true) {
+      try {
+        console.log("Running setup");
+        await this.setup();
+        console.log("Setup finished");
+        await this.runPhase(this.startPhase);
+        await this.runPhase(this.nominatePhase);
+        for (let index = 1; index <= 5; index++) {
+          await this.runPhase(this.sharingPhase);
+        }
+      } catch (error) {
+        if (error instanceof GameAbortedError) {
+          await this.server.sendMessage(
+            "admin",
+            `**Game Aborted**. Reason: ${
+              error.message ?? "Unknown"
+            }\nRestarting resetting game in 15 seconds...`
+          );
+          await wait(15000);
+        } else {
+          throw error;
+        }
+      }
+    }
   }
-  async startPhase() {
+
+  async endingPhase() {}
+
+  async setup() {
     this.players = new Set();
     this.roles = new Map();
     this.privateChannels = new Map();
@@ -55,24 +81,29 @@ export default class TwoRoomsOneBoomController {
       "room-one": null,
       "room-two": null,
     };
+    this.abortGameToken = createAsyncToken();
     this.phase = "Starting";
     await this.server.init();
     const server = this.server;
     await server.createPublicChannel("admin", "GUILD_TEXT");
     await server.createPublicChannel("lobby", "GUILD_VOICE");
+  }
 
+  async startPhase() {
+    const server = this.server;
     await server.sendMessage("admin", "Welcome to Two Rooms and a Boom!");
     await server.sendMessage(
       "admin",
       "This game requires a *minimum* of 6 players. Send *begin* in the admin chat (this one right here) to launch game. No new players will be able to join once the game begins, and a player leaving their voice channel will result in the game being terminated."
     );
 
+    const token = createAsyncToken();
     server.on("message:admin", async ({ message }) => {
       console.log("Got message", message.content);
       switch (message.content.toLowerCase()) {
         case "begin": {
           if (this.players.size > 0 && this.phase == "Starting")
-            await this.nominatePhase();
+            token.resolve();
           else
             message.reply(
               `This game requires a minimum of 6 people. There are currently ${this.players.size} players in the lobby.`
@@ -80,10 +111,11 @@ export default class TwoRoomsOneBoomController {
           break;
         }
         case "abort":
-          this.abort(
-            `${message.member.displayName} has manually aborted the game.`
+          this.abortGameToken.reject(
+            new GameAbortedError(
+              `${message.member.displayName} has manually aborted the game.`
+            )
           );
-          break;
       }
     });
 
@@ -94,20 +126,16 @@ export default class TwoRoomsOneBoomController {
     server.on<"disconnect">("disconnect", ({ user }) => {
       if (this.phase == "Starting") this.players.delete(user);
       else if (this.players.has(user))
-        this.abort(user.displayName + " abandoned the game");
+        this.abortGameToken.reject(
+          new GameAbortedError(user.displayName + " abandoned the game")
+        );
     });
 
-    const prompt = await server.prompt("admin", "Hello?", [
-      "Yes",
-      "Oui",
-      "Goodbye",
-    ]);
+    await token.promise;
+  }
 
-    wait(5000).then(() => prompt.cancel("Yes"));
-
-    const response = await prompt.getReply();
-
-    console.log(response);
+  runPhase(phase: () => Promise<void>) {
+    return Promise.race([phase.bind(this)(), this.abortGameToken.promise]);
   }
 
   assignRoles() {
@@ -218,14 +246,12 @@ export default class TwoRoomsOneBoomController {
     await Promise.all(roomPrompts);
 
     console.log("The nominee is", this.leaders["room-one"].displayName);
-    this.broadcast(
+    await this.broadcast(
       `${this.leaders["room-one"]} has been nominated as leader of Room One.`
     );
-    this.broadcast(
+    await this.broadcast(
       `${this.leaders["room-two"]} has been nominated as leader of Room Two.`
     );
-
-    this.sharingPhase();
   }
 
   async sharingPhase() {
