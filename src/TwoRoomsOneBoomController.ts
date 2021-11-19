@@ -1,6 +1,7 @@
 import Discord, { VoiceChannel } from "discord.js";
 import GameServer, { Prompt } from "./GameServer";
 import { wait, countdown } from "./util/Timer";
+import shuffle from "shuffle-array";
 
 type Role =
   | "President"
@@ -18,6 +19,8 @@ type Phase =
   | "Ending"
   | "Aborting";
 
+type RoomName = "room-one" | "room-two";
+const roomNames: RoomName[] = ["room-one", "room-two"];
 export default class TwoRoomsOneBoomController {
   server: GameServer;
   players: Set<Discord.GuildMember>;
@@ -116,6 +119,7 @@ export default class TwoRoomsOneBoomController {
       "Decoy",
       "Hot Potato",
     ];
+    shuffle(roles);
     for (let player of this.players) {
       let role = roles.pop();
       this.roles.set(player, role);
@@ -144,8 +148,13 @@ export default class TwoRoomsOneBoomController {
       "You have been moved into your rooms. More instructions in your private text channel."
     );
     await server.setChannelLock("admin", true);
+
+    const rooms = new Array(this.players.size)
+      .fill(0)
+      .map((_, i) => roomNames[i % 2]);
+    shuffle(rooms);
     for (let player of this.players) {
-      await server.moveToChannel(player, "room-one");
+      await server.moveToChannel(player, rooms.pop());
       const channelName = `${player.displayName}-private`;
       this.privateChannels.set(player, channelName);
       await server.createSecretChannel(channelName, "GUILD_TEXT");
@@ -155,44 +164,59 @@ export default class TwoRoomsOneBoomController {
     await server.removeChannel("lobby");
 
     this.assignRoles();
-    let prompts: Prompt<"Nominate">[] = [];
 
-    for (let player of this.players) {
-      const channelName = this.privateChannels.get(player);
-      await server.sendMessage(
-        channelName,
-        `Nomination phase: The first player to be nominated as Leader will be elected Leader of that room.`
-      );
-      for (let otherPlayer of this.players) {
-        if (player == otherPlayer) continue;
-        console.log(`Sending prompt for ${player} to nominate ${otherPlayer}`);
+    let prompts: Map<RoomName, Prompt<"Nominate">[]> = new Map();
+    for (let roomName of roomNames) {
+      prompts.set(roomName, []);
+      const players = server
+        .getChannelUsers(roomName)
+        .filter((p) => this.players.has(p));
 
-        const prompt = await server.prompt(
+      for (let player of players) {
+        const channelName = this.privateChannels.get(player);
+        await server.sendMessage(
           channelName,
-          `Nomination for Leader: ${otherPlayer}`,
-          ["Nominate"]
+          `Nomination phase: The first player to be nominated as Leader will be elected Leader of that room.`
         );
-        prompts.push(prompt);
+        for (let otherPlayer of players) {
+          if (player == otherPlayer) continue;
+          console.log(
+            `Sending prompt for ${player} to nominate ${otherPlayer}`
+          );
 
-        console.log(`Sent prompt for ${player} to nominate ${otherPlayer}`);
-        prompt.getReply().then((reply) => {
-          if (reply == "Nominate") {
-            this.leaders[
-              server.getChannelName(
-                otherPlayer.voice.channel as VoiceChannel
-              ) as "room-one" | "room-two"
-            ] = otherPlayer;
-            console.log("Nominating", otherPlayer.displayName);
+          const prompt = await server.prompt(
+            channelName,
+            `Nomination for Leader: ${otherPlayer}`,
+            ["Nominate"]
+          );
+          prompts.get(roomName).push(prompt);
 
-            prompts.forEach((p) => {
-              if (p != prompt) p.delete();
-            });
-          }
-        });
+          console.log(`Sent prompt for ${player} to nominate ${otherPlayer}`);
+          prompt.getReply().then((reply) => {
+            if (reply == "Nominate") {
+              this.leaders[
+                server.getChannelName(
+                  otherPlayer.voice.channel as VoiceChannel
+                ) as RoomName
+              ] = otherPlayer;
+              console.log("Nominating", otherPlayer.displayName);
+
+              prompts.get(roomName).forEach((p) => {
+                if (p != prompt) p.delete();
+              });
+            }
+          });
+        }
       }
     }
 
-    await Promise.all(prompts.map((p) => p.getReply()));
+    // Wait for leaders to be nominated
+    const roomPrompts = [...prompts.values()].flatMap((p) =>
+      p.map((p) => p.getReply())
+    );
+
+    await Promise.all(roomPrompts);
+
     console.log("The nominee is", this.leaders["room-one"].displayName);
     this.broadcast(
       `${this.leaders["room-one"]} has been nominated as leader of Room One.`
@@ -238,56 +262,64 @@ export default class TwoRoomsOneBoomController {
     await Promise.all(countdownMessages);
 
     const shareMessages: Prompt<any>[] = [];
-    for (let player of this.players) {
-      for (let otherPlayer of this.players) {
-        if (player == otherPlayer) continue;
 
-        let prompt = await this.server.prompt(
-          this.privateChannels.get(player),
-          `Trading with ${otherPlayer}`,
-          ["Share Affiliation", "Share Identity"]
-        );
+    for (let roomName of roomNames) {
+      const players = this.server
+        .getChannelUsers(roomName)
+        .filter((p) => this.players.has(p));
 
-        prompt.getReply().then(async (reply) => {
-          let confirmationPrompt = await this.server.prompt(
-            this.privateChannels.get(otherPlayer),
-            `${player} has requested to ${reply}`,
-            ["Accept", "Decline"]
+      for (let player of players) {
+        for (let otherPlayer of players) {
+          if (player == otherPlayer) continue;
+
+          let prompt = await this.server.prompt(
+            this.privateChannels.get(player),
+            `Trading with ${otherPlayer}`,
+            ["Share Affiliation", "Share Identity"]
           );
-          shareMessages.push(confirmationPrompt);
 
-          wait(20000).then(() => confirmationPrompt.cancel("Decline"));
+          prompt.getReply().then(async (reply) => {
+            let confirmationPrompt = await this.server.prompt(
+              this.privateChannels.get(otherPlayer),
+              `${player} has requested to ${reply}`,
+              ["Accept", "Decline"]
+            );
+            shareMessages.push(confirmationPrompt);
 
-          confirmationPrompt.getReply().then((reply) => {
-            switch (reply) {
-              case "Accept":
-                {
+            wait(20000).then(() => confirmationPrompt.cancel("Decline"));
+
+            confirmationPrompt.getReply().then((reply) => {
+              switch (reply) {
+                case "Accept":
+                  {
+                    this.server.sendMessage(
+                      this.privateChannels.get(player),
+                      `${otherPlayer} has revealed themselves to be **${this.roles.get(
+                        otherPlayer
+                      )}**`
+                    );
+                    this.server.sendMessage(
+                      this.privateChannels.get(otherPlayer),
+                      `${player} has revealed themselves to be **${this.roles.get(
+                        player
+                      )}**`
+                    );
+                  }
+                  break;
+                case "Decline": {
                   this.server.sendMessage(
                     this.privateChannels.get(player),
-                    `${otherPlayer} has revealed themselves to be ${this.roles.get(
-                      otherPlayer
-                    )}`
+                    `${otherPlayer} has declined to share their card with you`
                   );
-                  this.server.sendMessage(
-                    this.privateChannels.get(otherPlayer),
-                    `${player} has revealed themselves to be ${this.roles.get(
-                      player
-                    )}`
-                  );
+                  break;
                 }
-                break;
-              case "Decline": {
-                this.server.sendMessage(
-                  this.privateChannels.get(player),
-                  `${otherPlayer} has declined to share their card with you`
-                );
-                break;
               }
-            }
+            });
           });
-        });
+        }
       }
     }
+
     await countdownPromise;
     for (let m of shareMessages) {
       m.delete();

@@ -71,6 +71,12 @@ export default class GameServer {
     return [...this.channels.values()].includes(channel);
   }
 
+  getChannelUsers(channel: Discord.VoiceChannel | string) {
+    return this.voiceChannels
+      .get(this.getChannelName(channel))
+      .members.map((m) => m);
+  }
+
   getChannelName(channel: Discord.VoiceChannel | Discord.TextChannel | string) {
     if (channel == null) return null;
     if (typeof channel == "string")
